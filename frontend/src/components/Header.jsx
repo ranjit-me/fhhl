@@ -11,7 +11,7 @@ const PAGES = [
 ]
 
 export default function Header() {
-    const { wsStatus, modbusStatus, simMode, activePage, setActivePage } = useStore()
+    const { wsStatus, modbusStatus, activePage, setActivePage } = useStore()
     const [time, setTime] = useState(new Date())
 
     useEffect(() => {
@@ -20,8 +20,8 @@ export default function Header() {
     }, [])
 
     const isLive = modbusStatus.connected && wsStatus === 'open'
-    const dotColor = isLive ? '#3de8c0' : simMode ? '#f5c842' : '#f7716a'
-    const statusLabel = isLive ? 'LIVE' : simMode ? 'SIM' : 'OFFLINE'
+    const dotColor = isLive ? '#3de8c0' : '#f7716a'
+    const statusLabel = isLive ? 'LIVE' : 'OFFLINE'
 
     return (
         <header style={{

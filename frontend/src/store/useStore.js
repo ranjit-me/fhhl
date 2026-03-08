@@ -14,7 +14,6 @@ export const useStore = create((set, get) => ({
         slave_id: 1,
         poll_time: 1.0,
     },
-    simMode: false,
     latest: null,
     history: [],
     activePage: 'overview',
@@ -62,7 +61,6 @@ export const useStore = create((set, get) => ({
                 set({
                     history: msg.history || [],
                     modbusStatus: msg.status || get().modbusStatus,
-                    simMode: msg.status?.connected === false,
                 })
                 break
             case 'reading':
@@ -73,12 +71,15 @@ export const useStore = create((set, get) => ({
                         latest: msg.data,
                         history,
                         modbusStatus: msg.status || state.modbusStatus,
-                        simMode: false,
                     }
                 })
                 break
             case 'disconnected':
-                set((state) => ({ modbusStatus: msg.status || state.modbusStatus, simMode: true }))
+                set((state) => ({
+                    modbusStatus: { ...(msg.status || state.modbusStatus), connected: false },
+                    latest: null,
+                    history: [],
+                }))
                 break
             case 'error':
                 set((state) => ({ modbusStatus: msg.status || state.modbusStatus }))

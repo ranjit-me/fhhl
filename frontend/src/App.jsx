@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { useStore } from './store/useStore'
 import Header from './components/Header'
 import Sidebar from './components/Sidebar'
+import NoDeviceScreen from './components/NoDeviceScreen'
 import OverviewPage from './pages/OverviewPage'
 import GridPage from './pages/GridPage'
 import LoadPage from './pages/LoadPage'
@@ -19,13 +20,16 @@ const PAGE_MAP = {
 }
 
 export default function App() {
-    const { connectWS, activePage } = useStore()
+    const { connectWS, activePage, modbusStatus } = useStore()
 
     useEffect(() => {
         connectWS()
     }, [])
 
     const Page = PAGE_MAP[activePage] || OverviewPage
+    // Config page is always accessible so user can fix port settings
+    const deviceConnected = modbusStatus.connected
+    const showNoDevice = !deviceConnected && activePage !== 'config'
 
     return (
         <>
@@ -33,8 +37,8 @@ export default function App() {
             <Header />
             <div style={{ display: 'flex', height: 'calc(100vh - 56px)', overflow: 'hidden' }}>
                 <Sidebar />
-                <main style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)' }}>
-                    <Page />
+                <main style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
+                    {showNoDevice ? <NoDeviceScreen /> : <Page />}
                 </main>
             </div>
         </>

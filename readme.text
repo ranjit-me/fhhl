@@ -1,0 +1,1583 @@
+================================================================================
+  FHHL ENERGY MONITOR — FULL PROJECT DETAIL
+  Python FastAPI Backend + Vite/React Frontend
+  Modbus RTU → WebSocket → Real-Time Dashboard
+================================================================================
+
+GENERATED: 2026-03-07
+PROJECT VERSION: 2.0.0
+
+================================================================================
+  TABLE OF CONTENTS
+================================================================================
+
+  1.  PROJECT OVERVIEW
+  2.  FOLDER STRUCTURE
+  3.  HOW TO RUN
+  4.  ARCHITECTURE EXPLANATION
+  5.  BACKEND FILES (Full Code)
+      5.1  requirements.txt
+      5.2  models.py
+      5.3  config.py
+      5.4  modbus_reader.py
+      5.5  main.py
+  6.  FRONTEND FILES (Full Code)
+      6.1  package.json
+      6.2  vite.config.js
+      6.3  index.html
+      6.4  src/index.css
+      6.5  src/main.jsx
+      6.6  src/App.jsx
+      6.7  src/store/useStore.js
+      6.8  src/components/Header.jsx
+      6.9  src/components/Sidebar.jsx
+      6.10 src/components/MetricCard.jsx
+      6.11 src/components/PhaseTable.jsx
+      6.12 src/components/MiniChart.jsx
+      6.13 src/pages/OverviewPage.jsx
+      6.14 src/pages/GridPage.jsx
+      6.15 src/pages/LoadPage.jsx
+      6.16 src/pages/PowerPage.jsx
+      6.17 src/pages/TrendsPage.jsx
+      6.18 src/pages/ConfigPage.jsx
+  7.  REST API REFERENCE
+  8.  WEBSOCKET MESSAGE PROTOCOL
+  9.  MODBUS REGISTER MAP (Complete)
+  10. STARTUP SCRIPTS
+
+
+================================================================================
+  1. PROJECT OVERVIEW
+================================================================================
+
+This is a full-stack real-time energy monitoring system for a 3-phase power
+network with neutral (R/Y/B/N). It reads data from a Modbus RTU energy meter
+over RS485 serial, streams readings via WebSocket every 1 second, logs to CSV,
+and displays everything in a dark sci-fi dashboard.
+
+KEY FEATURES:
+  - Modbus RTU polling with Float32 CDAB byte-order decoding
+  - Batch register reads (groups contiguous addresses = fewer bus round-trips)
+  - Auto SIMULATION MODE when no hardware is present (synthetic live data)
+  - FastAPI REST + WebSocket backend
+  - Vite + React + Zustand frontend
+  - 6 dashboard pages: Overview, Grid, Load, Power, Trends, Config
+  - Hot-reload Modbus config without restarting
+  - CSV export via REST endpoint
+  - 3600-sample in-memory history (1 hour at 1-second poll)
+
+TECH STACK:
+  Backend  : Python 3.11+, FastAPI, uvicorn, pymodbus 3.7, pydantic 2
+  Frontend : Vite 5, React 18, Zustand, Recharts, JetBrains Mono / Orbitron fonts
+
+
+================================================================================
+  2. FOLDER STRUCTURE
+================================================================================
+
+energy-monitor/
+│
+├── start.bat                    ← Double-click on Windows to launch both
+├── start.sh                     ← Run on Linux/Mac
+├── README.md
+│
+├── backend/
+│   ├── requirements.txt         ← pip install -r requirements.txt
+│   ├── models.py                ← Pydantic data models
+│   ├── config.py                ← Settings + complete Modbus register map
+│   ├── modbus_reader.py         ← RTU connection, Float32 CDAB, batch reads, sim mode
+│   └── main.py                  ← FastAPI app: polling loop, WebSocket, REST API
+│
+└── frontend/
+    ├── package.json             ← npm install
+    ├── vite.config.js           ← Vite + proxy to backend
+    ├── index.html               ← Entry HTML with Google Fonts
+    └── src/
+        ├── main.jsx             ← React root mount
+        ├── App.jsx              ← Layout + page router
+        ├── index.css            ← CSS variables, animations, global styles
+        ├── store/
+        │   └── useStore.js      ← Zustand store: WS client, state, history
+        ├── components/
+        │   ├── Header.jsx       ← Logo, nav tabs, status pill, clock
+        │   ├── Sidebar.jsx      ← Page nav, Modbus info panel
+        │   ├── MetricCard.jsx   ← Single value card with alert support
+        │   ├── PhaseTable.jsx   ← R/Y/B/N rows table for a parameter group
+        │   └── MiniChart.jsx    ← Recharts sparkline for live data
+        └── pages/
+            ├── OverviewPage.jsx ← KPIs, currents, voltage, PF, THDi, temps
+            ├── GridPage.jsx     ← All grid register groups + sparklines
+            ├── LoadPage.jsx     ← All load/compensation register groups
+            ├── PowerPage.jsx    ← kW/kVAr/kVA bar charts (grid vs load)
+            ├── TrendsPage.jsx   ← Historical line charts, 30s–600s window
+            └── ConfigPage.jsx   ← Settings editor, status, CSV export
+
+
+================================================================================
+  3. HOW TO RUN
+================================================================================
+
+STEP 1 — Install backend dependencies:
+  cd backend
+  pip install -r requirements.txt
+
+STEP 2 — Configure your Modbus port (edit backend/config.py):
+  PORT     = "COM9"          # Windows serial port
+  # OR
+  PORT     = "/dev/ttyUSB0"  # Linux
+  BAUDRATE = 9600
+  SLAVE_ID = 1
+
+STEP 3 — Start the backend:
+  cd backend
+  python main.py
+  # Listening at http://localhost:8000
+
+STEP 4 — Install frontend dependencies:
+  cd frontend
+  npm install
+
+STEP 5 — Start the frontend:
+  cd frontend
+  npm run dev
+  # Open http://localhost:5173
+
+OR — use the startup scripts:
+  Windows : double-click start.bat
+  Linux   : chmod +x start.sh && ./start.sh
+
+NOTE: If no Modbus device is connected, the backend automatically enters
+SIMULATION MODE and streams realistic synthetic data. The frontend shows
+a yellow "SIM" badge instead of green "LIVE".
+
+
+================================================================================
+  4. ARCHITECTURE EXPLANATION
+================================================================================
+
+DATA FLOW:
+  RS485 Meter
+      |
+      | (pymodbus RTU, Float32 CDAB decode, batch reads)
+      v
+  ModbusReader (modbus_reader.py)
+      |
+      | every POLL_TIME seconds (async thread)
+      v
+  polling_loop() in main.py
+      |
+      |─── append to deque(maxlen=3600)  ← in-memory history
+      |─── write row to ems_log.csv      ← persistent log
+      |─── broadcast to all WS clients
+      v
+  WebSocket /ws
+      |
+      | JSON messages
+      v
+  useStore.js (Zustand)
+      |
+      |─── latest        ← most recent reading dict
+      |─── history[]     ← last 3600 readings
+      |─── modbusStatus  ← connection info
+      v
+  React pages (read from store, render charts/cards)
+
+MODBUS FLOAT32 CDAB DECODE:
+  Energy meters commonly use "CDAB" (middle-byte swapped) byte order.
+  Two 16-bit registers are read; then packed as:
+    struct.pack(">HH", regs[1], regs[0])   ← swap word order
+    struct.unpack(">f", ...)               ← read as big-endian float
+
+BATCH READS:
+  Instead of one Modbus request per register, contiguous register addresses
+  are grouped into blocks (gap <= 10 addresses). Each block is read with one
+  read_holding_registers() call. This reduces bus traffic significantly —
+  from ~60 individual requests to ~5-6 batch requests per poll cycle.
+
+WEBSOCKET PROTOCOL:
+  On connect: server sends full 60-sample history + current status ("init")
+  Every poll: server sends new reading + status ("reading")
+  On Modbus fail: server sends error/disconnected message
+  Client sends "ping" every 30s for keep-alive; server replies "pong"
+
+AUTO-RECONNECT:
+  Frontend: if WebSocket closes, Zustand store retries after 3 seconds.
+  Backend:  if Modbus disconnects, polling_loop retries ensure_connected()
+            on every poll cycle. If reconnect fails, broadcasts "disconnected"
+            and keeps trying.
+
+
+================================================================================
+  5. BACKEND FILES (Full Code)
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  5.1  backend/requirements.txt
+────────────────────────────────────────────────────────────────────────────────
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pymodbus==3.7.4
+pydantic==2.9.2
+
+
+────────────────────────────────────────────────────────────────────────────────
+  5.2  backend/models.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+Pydantic models for API responses and internal state
+"""
+
+from typing import Optional, Dict, Any
+from pydantic import BaseModel
+
+
+class EnergyReading(BaseModel):
+    timestamp: str
+    data: Dict[str, Optional[float]]
+
+
+class ConnectionStatus(BaseModel):
+    connected: bool = False
+    last_success: Optional[str] = None
+    last_attempt: Optional[str] = None
+    error_count: int = 0
+
+
+────────────────────────────────────────────────────────────────────────────────
+  5.3  backend/config.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+Configuration — all Modbus register maps + app settings
+"""
+
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
+
+
+@dataclass
+class Settings:
+    # ── Serial Port ──────────────────────────────────────────────────────────
+    PORT: str = "COM9"          # Change to /dev/ttyUSB0 on Linux
+    BAUDRATE: int = 9600
+    PARITY: str = "N"           # N=None, E=Even, O=Odd
+    STOPBITS: int = 1
+    BYTESIZE: int = 8
+    TIMEOUT: float = 1.0
+    SLAVE_ID: int = 1
+
+    # ── Polling ──────────────────────────────────────────────────────────────
+    POLL_TIME: float = 1.0      # seconds between polls
+    HISTORY_SIZE: int = 3600    # 1 hour at 1-second intervals
+
+    # ── Logging ──────────────────────────────────────────────────────────────
+    CSV_FILE: str = "ems_log.csv"
+
+
+settings = Settings()
+
+
+# ─── Register Map ─────────────────────────────────────────────────────────────
+# Format: name → (40xxx_address, unit, group, phase)
+# subtract 40001 from address to get zero-based Modbus offset
+
+REGISTER_MAP: Dict[str, Tuple[int, str, str, str]] = {
+    # ── Grid Currents (A) ────────────────────────────────────────────────────
+    "grid_i_r":        (40017, "A",    "grid_current",   "R"),
+    "grid_i_y":        (40019, "A",    "grid_current",   "Y"),
+    "grid_i_b":        (40021, "A",    "grid_current",   "B"),
+    "grid_i_n":        (40053, "A",    "grid_current",   "N"),
+
+    # ── Grid THDi (%) ────────────────────────────────────────────────────────
+    "grid_thdi_r":     (40011, "%",    "grid_thdi",      "R"),
+    "grid_thdi_y":     (40013, "%",    "grid_thdi",      "Y"),
+    "grid_thdi_b":     (40015, "%",    "grid_thdi",      "B"),
+    "grid_thdi_n":     (40055, "%",    "grid_thdi",      "N"),
+
+    # ── Load Currents (A) ────────────────────────────────────────────────────
+    "load_i_r":        (40029, "A",    "load_current",   "R"),
+    "load_i_y":        (40031, "A",    "load_current",   "Y"),
+    "load_i_b":        (40033, "A",    "load_current",   "B"),
+    "load_i_n":        (40077, "A",    "load_current",   "N"),
+
+    # ── Load THDi (%) ────────────────────────────────────────────────────────
+    "load_thdi_r":     (40023, "%",    "load_thdi",      "R"),
+    "load_thdi_y":     (40025, "%",    "load_thdi",      "Y"),
+    "load_thdi_b":     (40027, "%",    "load_thdi",      "B"),
+    "load_thdi_n":     (40079, "%",    "load_thdi",      "N"),
+
+    # ── Voltages (V) ─────────────────────────────────────────────────────────
+    "volt_r":          (40035, "V",    "voltage",        "R"),
+    "volt_y":          (40037, "V",    "voltage",        "Y"),
+    "volt_b":          (40039, "V",    "voltage",        "B"),
+
+    # ── Frequency (Hz) ───────────────────────────────────────────────────────
+    "freq_r":          (40041, "Hz",   "frequency",      "R"),
+    "freq_y":          (40043, "Hz",   "frequency",      "Y"),
+    "freq_b":          (40045, "Hz",   "frequency",      "B"),
+
+    # ── THDu (%) ─────────────────────────────────────────────────────────────
+    "thdu_r":          (40047, "%",    "thdu",           "R"),
+    "thdu_y":          (40049, "%",    "thdu",           "Y"),
+    "thdu_b":          (40051, "%",    "thdu",           "B"),
+
+    # ── Grid Power Factor ─────────────────────────────────────────────────────
+    "grid_pf_r":       (40057, "PF",   "grid_pf",        "R"),
+    "grid_pf_y":       (40059, "PF",   "grid_pf",        "Y"),
+    "grid_pf_b":       (40061, "PF",   "grid_pf",        "B"),
+    "grid_pf_n":       (40063, "PF",   "grid_pf",        "N"),
+
+    # ── Load Power Factor ─────────────────────────────────────────────────────
+    "load_pf_r":       (40081, "PF",   "load_pf",        "R"),
+    "load_pf_y":       (40083, "PF",   "load_pf",        "Y"),
+    "load_pf_b":       (40085, "PF",   "load_pf",        "B"),
+    "load_pf_n":       (40087, "PF",   "load_pf",        "N"),
+
+    # ── Compensation Current (A) ──────────────────────────────────────────────
+    "comp_cur_r":      (40065, "A",    "comp_current",   "R"),
+    "comp_cur_y":      (40067, "A",    "comp_current",   "Y"),
+    "comp_cur_b":      (40069, "A",    "comp_current",   "B"),
+
+    # ── Compensation Rate (%) ─────────────────────────────────────────────────
+    "comp_rate_r":     (40071, "%",    "comp_rate",      "R"),
+    "comp_rate_y":     (40073, "%",    "comp_rate",      "Y"),
+    "comp_rate_b":     (40075, "%",    "comp_rate",      "B"),
+
+    # ── Grid Power ────────────────────────────────────────────────────────────
+    "grid_kvar_r":     (40089, "kVAr", "grid_kvar",      "R"),
+    "grid_kvar_y":     (40091, "kVAr", "grid_kvar",      "Y"),
+    "grid_kvar_b":     (40093, "kVAr", "grid_kvar",      "B"),
+    "grid_kw_r":       (40095, "kW",   "grid_kw",        "R"),
+    "grid_kw_y":       (40097, "kW",   "grid_kw",        "Y"),
+    "grid_kw_b":       (40099, "kW",   "grid_kw",        "B"),
+    "grid_kva_r":      (40101, "kVA",  "grid_kva",       "R"),
+    "grid_kva_y":      (40103, "kVA",  "grid_kva",       "Y"),
+    "grid_kva_b":      (40105, "kVA",  "grid_kva",       "B"),
+
+    # ── Load Power ────────────────────────────────────────────────────────────
+    "load_kvar_r":     (40107, "kVAr", "load_kvar",      "R"),
+    "load_kvar_y":     (40109, "kVAr", "load_kvar",      "Y"),
+    "load_kvar_b":     (40111, "kVAr", "load_kvar",      "B"),
+    "load_kw_r":       (40113, "kW",   "load_kw",        "R"),
+    "load_kw_y":       (40115, "kW",   "load_kw",        "Y"),
+    "load_kw_b":       (40117, "kW",   "load_kw",        "B"),
+    "load_kva_r":      (40119, "kVA",  "load_kva",       "R"),
+    "load_kva_y":      (40121, "kVA",  "load_kva",       "Y"),
+    "load_kva_b":      (40123, "kVA",  "load_kva",       "B"),
+
+    # ── Temperature (°C) ──────────────────────────────────────────────────────
+    "temp_j1":         (40125, "°C",   "temperature",    "J1"),
+    "temp_j2":         (40127, "°C",   "temperature",    "J2"),
+    "temp_j3":         (40129, "°C",   "temperature",    "J3"),
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+  5.4  backend/modbus_reader.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+ModbusReader — handles RTU connection, float32 CDAB decode, batch reads,
+graceful reconnect, and simulated data mode (when no hardware present).
+"""
+
+import struct
+import time
+import random
+import math
+from typing import Optional, Dict
+
+from config import Settings, REGISTER_MAP
+
+
+class ModbusReader:
+    def __init__(self, settings: Settings):
+        self.settings = settings
+        self._client = None
+        self._sim_mode = False      # auto-enabled if pymodbus missing or connect fails
+        self._sim_t = 0.0           # time counter for simulation
+
+        try:
+            from pymodbus.client import ModbusSerialClient
+            self._ModbusSerialClient = ModbusSerialClient
+        except ImportError:
+            print("[MODBUS] pymodbus not installed — enabling SIMULATION mode")
+            self._sim_mode = True
+            self._ModbusSerialClient = None
+
+    # ─── Connection ───────────────────────────────────────────────────────────
+    def ensure_connected(self) -> bool:
+        if self._sim_mode:
+            return True
+        if self._client and self._client.is_socket_open():
+            return True
+        return self._connect()
+
+    def _connect(self) -> bool:
+        try:
+            if self._client:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+
+            self._client = self._ModbusSerialClient(
+                port=self.settings.PORT,
+                baudrate=self.settings.BAUDRATE,
+                parity=self.settings.PARITY,
+                stopbits=self.settings.STOPBITS,
+                bytesize=self.settings.BYTESIZE,
+                timeout=self.settings.TIMEOUT,
+            )
+            result = self._client.connect()
+            if result:
+                print(f"[MODBUS] Connected to {self.settings.PORT}")
+            else:
+                print(f"[MODBUS] Failed to connect to {self.settings.PORT} — using SIMULATION")
+                self._sim_mode = True
+            return result
+        except Exception as e:
+            print(f"[MODBUS] Connection error: {e} — using SIMULATION")
+            self._sim_mode = True
+            return False
+
+    def close(self):
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+            self._client = None
+
+    def update_settings(self, settings: Settings):
+        self.settings = settings
+        self._sim_mode = False
+
+    # ─── Float32 CDAB Decode ──────────────────────────────────────────────────
+    @staticmethod
+    def _decode_float32_cdab(regs) -> float:
+        """
+        CDAB byte order (most common for energy meters).
+        regs[0] = high word (CD), regs[1] = low word (AB)
+        pack as ">HH" then unpack as ">f"
+        """
+        raw = struct.pack(">HH", regs[1], regs[0])
+        return round(struct.unpack(">f", raw)[0], 3)
+
+    # ─── Single Register Read ─────────────────────────────────────────────────
+    def _read_float32(self, reg_400xx: int) -> Optional[float]:
+        address = reg_400xx - 40001
+        try:
+            res = self._client.read_holding_registers(
+                address=address,
+                count=2,
+                slave=self.settings.SLAVE_ID,
+            )
+            if res.isError():
+                return None
+            return self._decode_float32_cdab(res.registers)
+        except Exception as e:
+            print(f"[MODBUS] Read error at {reg_400xx}: {e}")
+            return None
+
+    # ─── Batch Read (faster — one request per contiguous block) ──────────────
+    def _batch_read(self) -> Dict[str, Optional[float]]:
+        """Read all registers in minimal batches by contiguous address ranges."""
+        result = {}
+
+        # Build sorted list of (name, address)
+        items = sorted(
+            [(name, addr) for name, (addr, *_) in REGISTER_MAP.items()],
+            key=lambda x: x[1]
+        )
+
+        # Group into contiguous blocks (gap <= 10 registers)
+        blocks = []
+        block_start = None
+        block_names = []
+        prev_addr = None
+
+        for name, addr in items:
+            if prev_addr is None or (addr - prev_addr) > 10:
+                if block_names:
+                    blocks.append((block_start, block_names))
+                block_start = addr
+                block_names = [(name, addr)]
+            else:
+                block_names.append((name, addr))
+            prev_addr = addr
+
+        if block_names:
+            blocks.append((block_start, block_names))
+
+        for block_base_addr, block_items in blocks:
+            last_addr = block_items[-1][1]
+            count = (last_addr - block_base_addr) + 2  # +2 for float32
+
+            offset = block_base_addr - 40001
+            try:
+                res = self._client.read_holding_registers(
+                    address=offset,
+                    count=count,
+                    slave=self.settings.SLAVE_ID,
+                )
+                if res.isError():
+                    for name, _ in block_items:
+                        result[name] = None
+                    continue
+
+                for name, addr in block_items:
+                    rel = addr - block_base_addr
+                    if rel + 1 < len(res.registers):
+                        try:
+                            result[name] = self._decode_float32_cdab(
+                                [res.registers[rel], res.registers[rel + 1]]
+                            )
+                        except Exception:
+                            result[name] = None
+                    else:
+                        result[name] = None
+
+            except Exception as e:
+                print(f"[MODBUS] Batch read error: {e}")
+                for name, _ in block_items:
+                    result[name] = None
+
+        return result
+
+    # ─── Simulation Mode ──────────────────────────────────────────────────────
+    def _simulate(self) -> Dict[str, float]:
+        t = self._sim_t
+        self._sim_t += self.settings.POLL_TIME
+
+        def noisy(base, amp=0.05, freq=0.1):
+            return round(base + amp * base * math.sin(freq * t) + random.uniform(-0.002, 0.002) * base, 3)
+
+        return {
+            "grid_i_r": noisy(150.0, 0.03, 0.07),
+            "grid_i_y": noisy(148.5, 0.03, 0.08),
+            "grid_i_b": noisy(151.2, 0.03, 0.06),
+            "grid_i_n": noisy(3.5,   0.1,  0.15),
+            "grid_thdi_r": noisy(8.2,  0.1, 0.05),
+            "grid_thdi_y": noisy(8.5,  0.1, 0.06),
+            "grid_thdi_b": noisy(8.0,  0.1, 0.04),
+            "grid_thdi_n": noisy(15.1, 0.1, 0.09),
+            "load_i_r": noisy(140.0, 0.04, 0.07),
+            "load_i_y": noisy(138.0, 0.04, 0.08),
+            "load_i_b": noisy(141.5, 0.04, 0.06),
+            "load_i_n": noisy(4.2,   0.1,  0.13),
+            "load_thdi_r": noisy(12.3, 0.1, 0.05),
+            "load_thdi_y": noisy(12.8, 0.1, 0.06),
+            "load_thdi_b": noisy(12.1, 0.1, 0.04),
+            "load_thdi_n": noisy(22.5, 0.1, 0.09),
+            "volt_r": noisy(230.0, 0.01, 0.03),
+            "volt_y": noisy(230.5, 0.01, 0.04),
+            "volt_b": noisy(229.8, 0.01, 0.035),
+            "freq_r": noisy(50.0, 0.002, 0.02),
+            "freq_y": noisy(50.0, 0.002, 0.02),
+            "freq_b": noisy(50.0, 0.002, 0.02),
+            "thdu_r": noisy(2.1, 0.05, 0.04),
+            "thdu_y": noisy(2.3, 0.05, 0.05),
+            "thdu_b": noisy(2.0, 0.05, 0.03),
+            "grid_pf_r": noisy(0.92, 0.02, 0.06),
+            "grid_pf_y": noisy(0.91, 0.02, 0.07),
+            "grid_pf_b": noisy(0.93, 0.02, 0.05),
+            "grid_pf_n": noisy(0.85, 0.03, 0.08),
+            "load_pf_r": noisy(0.88, 0.02, 0.06),
+            "load_pf_y": noisy(0.87, 0.02, 0.07),
+            "load_pf_b": noisy(0.89, 0.02, 0.05),
+            "load_pf_n": noisy(0.82, 0.03, 0.08),
+            "comp_cur_r": noisy(10.2, 0.1, 0.1),
+            "comp_cur_y": noisy(10.5, 0.1, 0.1),
+            "comp_cur_b": noisy(9.8,  0.1, 0.1),
+            "comp_rate_r": noisy(88.0, 0.03, 0.07),
+            "comp_rate_y": noisy(87.5, 0.03, 0.08),
+            "comp_rate_b": noisy(89.0, 0.03, 0.06),
+            "grid_kvar_r": noisy(8.5,  0.05, 0.06),
+            "grid_kvar_y": noisy(8.3,  0.05, 0.07),
+            "grid_kvar_b": noisy(8.7,  0.05, 0.05),
+            "grid_kw_r":   noisy(34.5, 0.03, 0.04),
+            "grid_kw_y":   noisy(34.1, 0.03, 0.05),
+            "grid_kw_b":   noisy(34.8, 0.03, 0.03),
+            "grid_kva_r":  noisy(37.5, 0.03, 0.04),
+            "grid_kva_y":  noisy(37.1, 0.03, 0.05),
+            "grid_kva_b":  noisy(37.8, 0.03, 0.03),
+            "load_kvar_r": noisy(9.1,  0.05, 0.06),
+            "load_kvar_y": noisy(8.9,  0.05, 0.07),
+            "load_kvar_b": noisy(9.3,  0.05, 0.05),
+            "load_kw_r":   noisy(32.0, 0.03, 0.04),
+            "load_kw_y":   noisy(31.8, 0.03, 0.05),
+            "load_kw_b":   noisy(32.2, 0.03, 0.03),
+            "load_kva_r":  noisy(36.4, 0.03, 0.04),
+            "load_kva_y":  noisy(36.1, 0.03, 0.05),
+            "load_kva_b":  noisy(36.7, 0.03, 0.03),
+            "temp_j1": noisy(42.3, 0.02, 0.01),
+            "temp_j2": noisy(45.1, 0.02, 0.01),
+            "temp_j3": noisy(41.8, 0.02, 0.01),
+        }
+
+    # ─── Public API ───────────────────────────────────────────────────────────
+    def read_all(self) -> Optional[Dict]:
+        if self._sim_mode:
+            return self._simulate()
+        try:
+            return self._batch_read()
+        except Exception as e:
+            print(f"[MODBUS] read_all error: {e}")
+            return None
+
+
+────────────────────────────────────────────────────────────────────────────────
+  5.5  backend/main.py
+────────────────────────────────────────────────────────────────────────────────
+
+"""
+FHHL Energy Monitor — FastAPI Backend
+Modbus RTU/TCP → WebSocket → Vite Frontend
+"""
+
+import asyncio
+import csv
+import json
+import struct
+import time
+from collections import deque
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+
+from config import settings
+from modbus_reader import ModbusReader
+from models import EnergyReading, ConnectionStatus
+
+# ─── App Setup ───────────────────────────────────────────────────────────────
+app = FastAPI(
+    title="FHHL Energy Monitor API",
+    description="Real-time Modbus energy monitoring backend",
+    version="2.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── Global State ─────────────────────────────────────────────────────────────
+modbus = ModbusReader(settings)
+connected_clients: list[WebSocket] = []
+history: deque = deque(maxlen=settings.HISTORY_SIZE)
+latest_reading: Optional[dict] = None
+connection_status = ConnectionStatus()
+CSV_PATH = Path(settings.CSV_FILE)
+
+
+# ─── CSV Logging ─────────────────────────────────────────────────────────────
+def log_to_csv(reading: dict):
+    file_exists = CSV_PATH.exists()
+    with open(CSV_PATH, "a", newline="") as f:
+        fieldnames = ["timestamp"] + list(reading.keys())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        row = {"timestamp": datetime.now().isoformat(), **reading}
+        writer.writerow(row)
+
+
+# ─── WebSocket Broadcast ──────────────────────────────────────────────────────
+async def broadcast(payload: dict):
+    dead = []
+    for ws in connected_clients:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        connected_clients.remove(ws)
+
+
+# ─── Modbus Polling Loop ──────────────────────────────────────────────────────
+async def polling_loop():
+    global latest_reading
+    print(f"[POLL] Starting polling on {settings.PORT} @ {settings.BAUDRATE} baud")
+
+    while True:
+        t0 = asyncio.get_event_loop().time()
+        connected = await asyncio.to_thread(modbus.ensure_connected)
+        connection_status.connected = connected
+        connection_status.last_attempt = datetime.now().isoformat()
+
+        if connected:
+            reading = await asyncio.to_thread(modbus.read_all)
+            if reading:
+                connection_status.last_success = datetime.now().isoformat()
+                connection_status.error_count = 0
+                latest_reading = reading
+                history.append({"timestamp": datetime.now().isoformat(), **reading})
+                await asyncio.to_thread(log_to_csv, reading)
+                await broadcast({
+                    "type": "reading",
+                    "data": reading,
+                    "timestamp": datetime.now().isoformat(),
+                    "status": connection_status.dict(),
+                })
+            else:
+                connection_status.error_count += 1
+                await broadcast({
+                    "type": "error",
+                    "message": "Failed to read registers",
+                    "status": connection_status.dict(),
+                })
+        else:
+            connection_status.error_count += 1
+            await broadcast({
+                "type": "disconnected",
+                "message": f"Cannot connect to {settings.PORT}",
+                "status": connection_status.dict(),
+            })
+
+        elapsed = asyncio.get_event_loop().time() - t0
+        await asyncio.sleep(max(0.0, settings.POLL_TIME - elapsed))
+
+
+# ─── Lifespan ────────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(polling_loop())
+    print("[APP] FHHL Energy Monitor backend started")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    modbus.close()
+    print("[APP] Modbus closed")
+
+
+# ─── REST Endpoints ──────────────────────────────────────────────────────────
+@app.get("/api/status")
+async def get_status():
+    return {
+        "connected": connection_status.connected,
+        "last_success": connection_status.last_success,
+        "error_count": connection_status.error_count,
+        "port": settings.PORT,
+        "baudrate": settings.BAUDRATE,
+        "slave_id": settings.SLAVE_ID,
+        "poll_time": settings.POLL_TIME,
+    }
+
+
+@app.get("/api/latest")
+async def get_latest():
+    if not latest_reading:
+        return {"data": None, "message": "No data yet"}
+    return {"data": latest_reading, "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/api/history")
+async def get_history(limit: int = 60):
+    items = list(history)[-limit:]
+    return {"data": items, "count": len(items)}
+
+
+@app.get("/api/config")
+async def get_config():
+    return {
+        "PORT": settings.PORT,
+        "BAUDRATE": settings.BAUDRATE,
+        "SLAVE_ID": settings.SLAVE_ID,
+        "POLL_TIME": settings.POLL_TIME,
+        "CSV_FILE": settings.CSV_FILE,
+        "HISTORY_SIZE": settings.HISTORY_SIZE,
+    }
+
+
+@app.post("/api/config")
+async def update_config(body: dict):
+    """Hot-reload config (reconnects Modbus if port/baud changed)"""
+    reconnect = False
+    if "PORT" in body and body["PORT"] != settings.PORT:
+        settings.PORT = body["PORT"]
+        reconnect = True
+    if "BAUDRATE" in body and int(body["BAUDRATE"]) != settings.BAUDRATE:
+        settings.BAUDRATE = int(body["BAUDRATE"])
+        reconnect = True
+    if "SLAVE_ID" in body:
+        settings.SLAVE_ID = int(body["SLAVE_ID"])
+    if "POLL_TIME" in body:
+        settings.POLL_TIME = float(body["POLL_TIME"])
+    if reconnect:
+        modbus.close()
+        modbus.update_settings(settings)
+    return {"ok": True, "reconnect": reconnect}
+
+
+@app.get("/api/export/csv")
+async def export_csv():
+    from fastapi.responses import FileResponse
+    if not CSV_PATH.exists():
+        return {"error": "No CSV file yet"}
+    return FileResponse(CSV_PATH, media_type="text/csv", filename=CSV_PATH.name)
+
+
+# ─── WebSocket ────────────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    connected_clients.append(websocket)
+    print(f"[WS] Client connected ({len(connected_clients)} total)")
+
+    await websocket.send_json({
+        "type": "init",
+        "history": list(history)[-60:],
+        "status": connection_status.dict(),
+    })
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_json({"type": "pong"})
+    except WebSocketDisconnect:
+        connected_clients.remove(websocket)
+        print(f"[WS] Client disconnected ({len(connected_clients)} total)")
+
+
+if __name__ == "__main__":
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
+
+
+================================================================================
+  6. FRONTEND FILES (Full Code)
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  6.1  frontend/package.json
+────────────────────────────────────────────────────────────────────────────────
+
+{
+  "name": "fhhl-energy-monitor",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7",
+    "zustand": "^4.5.4",
+    "clsx": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.1"
+  }
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.2  frontend/vite.config.js
+────────────────────────────────────────────────────────────────────────────────
+
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 5173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/ws': {
+        target: 'ws://localhost:8000',
+        ws: true,
+      },
+    },
+  },
+})
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.3  frontend/index.html
+────────────────────────────────────────────────────────────────────────────────
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FHHL Energy Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Orbitron:wght@400;600;700;900&family=JetBrains+Mono:wght@300;400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.4  frontend/src/index.css
+────────────────────────────────────────────────────────────────────────────────
+
+:root {
+  --bg:         #07080f;
+  --surface:    #0e0f1c;
+  --surface2:   #13152a;
+  --surface3:   #181a30;
+  --border:     #1e2248;
+  --border2:    #252a5a;
+  --accent:     #7c6af7;
+  --accent2:    #3de8c0;
+  --accent3:    #f7716a;
+  --accent4:    #f5c842;
+  --warn:       #ff4560;
+  --text:       #b0b8e8;
+  --text-dim:   #3a4070;
+  --text-mid:   #6570a8;
+  --text-bright:#e8eaff;
+  --r:          #f7716a;
+  --y:          #f5c842;
+  --b:          #4da6ff;
+  --n:          #c084fc;
+  --mono:       'JetBrains Mono', monospace;
+  --head:       'Orbitron', sans-serif;
+  --body:       'Rajdhani', sans-serif;
+  --radius:     6px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 15px; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: var(--body); min-height: 100vh; overflow-x: hidden;
+}
+body::after {
+  content: ''; position: fixed; inset: 0;
+  background-image: url("data:image/svg+xml,...noise...");
+  pointer-events: none; z-index: 9999; opacity: 0.5;
+}
+.scanline {
+  position: fixed; top: 0; left: 0; width: 100%; height: 1px;
+  background: rgba(124,106,247,0.15); z-index: 9998;
+  animation: scan 10s linear infinite; pointer-events: none;
+}
+@keyframes scan { 0% { top: 56px; } 100% { top: 100vh; } }
+@keyframes blink {
+  0%,100% { opacity:1; box-shadow: 0 0 6px currentColor; }
+  50% { opacity:0.3; box-shadow: none; }
+}
+@keyframes hex-pulse {
+  0%,100% { filter: drop-shadow(0 0 5px var(--accent)); }
+  50% { filter: drop-shadow(0 0 14px var(--accent)); }
+}
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fade-in 0.3s ease; }
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.5  frontend/src/main.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import App from './App'
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.6  frontend/src/App.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+import { useEffect } from 'react'
+import { useStore } from './store/useStore'
+import Header from './components/Header'
+import Sidebar from './components/Sidebar'
+import OverviewPage from './pages/OverviewPage'
+import GridPage    from './pages/GridPage'
+import LoadPage    from './pages/LoadPage'
+import PowerPage   from './pages/PowerPage'
+import TrendsPage  from './pages/TrendsPage'
+import ConfigPage  from './pages/ConfigPage'
+
+const PAGE_MAP = {
+  overview: OverviewPage,
+  grid:     GridPage,
+  load:     LoadPage,
+  power:    PowerPage,
+  trends:   TrendsPage,
+  config:   ConfigPage,
+}
+
+export default function App() {
+  const { connectWS, activePage } = useStore()
+
+  useEffect(() => {
+    connectWS()
+  }, [])
+
+  const Page = PAGE_MAP[activePage] || OverviewPage
+
+  return (
+    <>
+      <div className="scanline" />
+      <Header />
+      <div style={{ display: 'flex', height: 'calc(100vh - 56px)', overflow: 'hidden' }}>
+        <Sidebar />
+        <main style={{ flex: 1, overflowY: 'auto', background: 'var(--bg)' }}>
+          <Page />
+        </main>
+      </div>
+    </>
+  )
+}
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.7  frontend/src/store/useStore.js
+────────────────────────────────────────────────────────────────────────────────
+
+import { create } from 'zustand'
+
+const WS_URL = 'ws://localhost:8000/ws'
+const RECONNECT_DELAY = 3000
+
+export const useStore = create((set, get) => ({
+  wsStatus: 'connecting',
+  modbusStatus: {
+    connected: false, last_success: null,
+    error_count: 0, port: 'COM9', baudrate: 9600, slave_id: 1, poll_time: 1.0,
+  },
+  simMode: false,
+  latest: null,
+  history: [],
+  activeTab: 'overview',
+  activePage: 'overview',
+  _ws: null,
+  _reconnectTimer: null,
+
+  setActiveTab: (tab) => set({ activeTab: tab }),
+  setActivePage: (page) => set({ activePage: page }),
+
+  connectWS: () => {
+    const { _ws, _reconnectTimer } = get()
+    if (_reconnectTimer) clearTimeout(_reconnectTimer)
+    if (_ws && _ws.readyState === WebSocket.OPEN) return
+
+    set({ wsStatus: 'connecting' })
+    const ws = new WebSocket(WS_URL)
+
+    ws.onopen = () => {
+      set({ wsStatus: 'open', _ws: ws })
+      ws._pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send('ping')
+      }, 30000)
+    }
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data)
+        get()._handleMessage(msg)
+      } catch (e) { console.error('[WS] Parse error', e) }
+    }
+
+    ws.onclose = () => {
+      if (ws._pingInterval) clearInterval(ws._pingInterval)
+      set({ wsStatus: 'closed' })
+      const timer = setTimeout(() => get().connectWS(), RECONNECT_DELAY)
+      set({ _reconnectTimer: timer })
+    }
+
+    ws.onerror = () => { set({ wsStatus: 'error' }) }
+    set({ _ws: ws })
+  },
+
+  _handleMessage: (msg) => {
+    switch (msg.type) {
+      case 'init':
+        set({
+          history: msg.history || [],
+          modbusStatus: msg.status || get().modbusStatus,
+          simMode: msg.status?.connected === false,
+        })
+        break
+      case 'reading':
+        set((state) => {
+          const newEntry = { timestamp: msg.timestamp, ...msg.data }
+          const history = [...state.history, newEntry].slice(-3600)
+          return { latest: msg.data, history, modbusStatus: msg.status || state.modbusStatus, simMode: false }
+        })
+        break
+      case 'disconnected':
+        set((state) => ({ modbusStatus: msg.status || state.modbusStatus, simMode: true }))
+        break
+      case 'error':
+        set((state) => ({ modbusStatus: msg.status || state.modbusStatus }))
+        break
+    }
+  },
+
+  getHistory: (key, limit = 60) => {
+    return get().history.slice(-limit).map((h) => ({ t: h.timestamp, v: h[key] ?? null }))
+  },
+}))
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.8  frontend/src/components/Header.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Top navigation bar with:
+    - Hexagon logo with pulse animation
+    - 6 page tab buttons (Overview/Grid/Load/Power/Trends/Config)
+    - Status pill showing LIVE (green) / SIM (yellow) / OFFLINE (red)
+    - Error count badge
+    - Live clock (updates every 1 second)
+
+  STATE USED: wsStatus, modbusStatus, simMode, activePage, setActivePage
+
+  KEY UI DECISIONS:
+    - isLive = modbusStatus.connected AND wsStatus === 'open'
+    - dotColor changes between #3de8c0 (live), #f5c842 (sim), #f7716a (offline)
+    - Clock uses en-GB locale for HH:MM:SS format
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.9  frontend/src/components/Sidebar.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Left sidebar with:
+    - MONITORING section: Overview, Grid Side, Load Side, Power, Trends
+    - SYSTEM section: Config
+    - Bottom panel: live Modbus connection info (PORT / BAUD / ID / POLL)
+    - "LAST OK" timestamp
+
+  NAVIGATION: Clicking any item calls setActivePage(id)
+  ACTIVE ITEM: Left border colored + light accent background
+
+  PHASE COLOR CODING throughout all components:
+    R = #f7716a (red-orange)
+    Y = #f5c842 (yellow)
+    B = #4da6ff (blue)
+    N = #c084fc (purple)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.10 frontend/src/components/MetricCard.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Single metric display card with:
+    - Colored top accent bar (gradient from color to transparent)
+    - Mono label in dim text
+    - Large Orbitron font value
+    - Unit in accent color
+    - Optional sub-text
+    - Alert mode: red border + red glow + red value color
+
+  PROPS:
+    label    : string — parameter name shown above value
+    value    : number | null — null shows "---"
+    unit     : string — shown after value
+    color    : hex string — accent color
+    sub      : string — optional subtitle
+    alert    : boolean — switches to warning style
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.11 frontend/src/components/PhaseTable.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Table showing R/Y/B/N rows for a single parameter group.
+    - Header: colored left-bar, parameter title, unit
+    - Each row: phase badge (colored box with letter) + right-aligned value
+    - Null values show "---"
+
+  PROPS:
+    title : string — e.g. "Grid Current"
+    rows  : [{phase: "R"|"Y"|"B"|"N", value: number|null}]
+    unit  : string — shown in header
+    color : hex string — header accent color
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.12 frontend/src/components/MiniChart.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Small sparkline chart (Recharts LineChart) for embedding in cards.
+    - Reads last `limit` samples from store history for the given dataKey
+    - Shows tooltip on hover
+    - No dots, no animation (performance-optimized for 1s updates)
+    - Shows "NO DATA" placeholder when fewer than 2 samples
+
+  PROPS:
+    dataKey : string — key in history objects (e.g. "grid_i_r")
+    color   : hex string — line color
+    height  : number — chart height in px
+    limit   : number — number of samples to display (default 60)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.13 frontend/src/pages/OverviewPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Main dashboard page showing all key metrics at a glance.
+
+  SECTIONS:
+    System Summary (4 cards):
+      - Grid Total kW (sum R+Y+B)
+      - Load Total kW (sum R+Y+B)
+      - Avg Voltage (mean R+Y+B)
+      - Avg Frequency (mean R+Y+B)
+
+    Grid Currents (4 cards with embedded sparklines):
+      - Grid I-R, I-Y, I-B, I-N with 40-sample sparklines
+
+    Voltages & Frequency (6 MetricCards, 3 columns):
+      - Volt R/Y/B + Freq R/Y/B
+
+    Power Factor — Grid (4 MetricCards):
+      - PF R/Y/B/N — ALERT if < 0.85
+
+    THDi Grid (4 MetricCards):
+      - THDi R/Y/B/N — ALERT if > 15%
+
+    Temperature (3 MetricCards):
+      - Temp J1/J2/J3 — ALERT if > 70°C
+
+    SIM BANNER: shown when simMode=true (yellow notification bar)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.14 frontend/src/pages/GridPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Detailed view of all grid-side register groups.
+
+  PHASE TABLES (3-column grid):
+    - Grid Current (A)    R/Y/B/N
+    - Grid THDi (%)       R/Y/B/N
+    - Voltage (V)         R/Y/B
+    - Frequency (Hz)      R/Y/B
+    - Grid PF             R/Y/B/N
+    - Grid kW             R/Y/B
+    - Grid kVAr           R/Y/B
+    - Grid kVA            R/Y/B
+    - THDu (%)            R/Y/B
+
+  SPARKLINES SECTION (3-column grid):
+    - Grid I-R, I-Y, I-B (60-sample, phase colors)
+    - Volt R, Volt Y, Volt B (60-sample, phase colors)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.15 frontend/src/pages/LoadPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Detailed view of all load-side and compensation register groups.
+
+  PHASE TABLES (3-column grid):
+    - Load Current (A)    R/Y/B/N
+    - Load THDi (%)       R/Y/B/N
+    - Load PF             R/Y/B/N
+    - Load kW             R/Y/B
+    - Load kVAr           R/Y/B
+    - Load kVA            R/Y/B
+    - Comp Current (A)    R/Y/B
+    - Comp Rate (%)       R/Y/B
+
+  SPARKLINES SECTION:
+    - Comp Rate R/Y/B (64-sample sparklines)
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.16 frontend/src/pages/PowerPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Visual comparison of grid vs load power per phase.
+
+  SUMMARY CARDS (top row, 6 columns):
+    - GRID kW-R, LOAD kW-R, GRID kW-Y, LOAD kW-Y, GRID kW-B, LOAD kW-B
+
+  BAR CHARTS (Recharts BarChart, grouped):
+    1. Active Power kW per Phase   (Grid kW vs Load kW, blue vs yellow)
+    2. Reactive Power kVAr         (Grid kVAr vs Load kVAr, red vs purple)
+    3. Apparent Power kVA          (Grid kVA vs Load kVA, teal vs purple)
+
+  Each chart has: CartesianGrid, XAxis (R/Y/B), YAxis, Tooltip, Legend.
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.17 frontend/src/pages/TrendsPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Historical trend viewer with adjustable time window.
+
+  WINDOW SELECTOR: 30s / 60s / 120s / 300s / 600s buttons
+  SAMPLE COUNTER: shows how many points are currently displayed
+
+  6 LINE CHARTS (Recharts LineChart):
+    1. Grid Currents (A)     — I-R / I-Y / I-B / I-N (4 lines)
+    2. Voltages (V)          — V-R / V-Y / V-B (3 lines)
+    3. Grid THDi (%)         — THDi-R/Y/B/N (4 lines)
+    4. Grid Power Factor     — PF-R/Y/B (3 lines)
+    5. Grid Active Power kW  — kW-R/Y/B (3 lines)
+    6. Temperature (°C)      — J1/J2/J3 (3 lines)
+
+  All charts: isAnimationActive=false (no re-animation on new data),
+  connectNulls=true (no gaps for null readings), dot=false (performance).
+
+
+────────────────────────────────────────────────────────────────────────────────
+  6.18 frontend/src/pages/ConfigPage.jsx
+────────────────────────────────────────────────────────────────────────────────
+
+  PURPOSE: Settings management and system info page.
+
+  SECTIONS:
+    Connection Status Card:
+      - Live display of: connected, error count, port, baud, slave ID,
+        poll time, last successful read time
+
+    Edit Settings Card:
+      - Input fields: PORT, BAUDRATE, SLAVE_ID, POLL_TIME
+      - APPLY CONFIG button → POST /api/config
+      - Shows success/error message after save
+      - If port or baud changed, backend auto-reconnects Modbus
+
+    Data Export Card:
+      - EXPORT CSV button → opens GET /api/export/csv in new tab
+
+    Register Map Reference Card:
+      - Visual table of all register address ranges and their descriptions
+      - Useful for debugging without having to open config.py
+
+
+================================================================================
+  7. REST API REFERENCE
+================================================================================
+
+Base URL: http://localhost:8000
+
+  GET  /api/status
+    Returns: { connected, last_success, error_count, port, baudrate,
+               slave_id, poll_time }
+
+  GET  /api/latest
+    Returns: { data: { key: float, ... }, timestamp }
+    Note: data keys match REGISTER_MAP names (e.g. "grid_i_r", "volt_r")
+
+  GET  /api/history?limit=60
+    Returns: { data: [ { timestamp, ...all_register_values }, ... ], count }
+    Default: last 60 samples. Max stored: 3600 (1 hour)
+
+  GET  /api/config
+    Returns: { PORT, BAUDRATE, SLAVE_ID, POLL_TIME, CSV_FILE, HISTORY_SIZE }
+
+  POST /api/config
+    Body: { PORT?, BAUDRATE?, SLAVE_ID?, POLL_TIME? }
+    Returns: { ok: true, reconnect: bool }
+    Note: reconnect=true means Modbus was closed and will re-open
+
+  GET  /api/export/csv
+    Returns: CSV file download (Content-Disposition: attachment)
+    Columns: timestamp, grid_i_r, grid_i_y, ... (all register names)
+
+  GET  /docs
+    FastAPI auto-generated Swagger UI (OpenAPI docs)
+
+
+================================================================================
+  8. WEBSOCKET MESSAGE PROTOCOL
+================================================================================
+
+ENDPOINT: ws://localhost:8000/ws
+
+--- SERVER → CLIENT MESSAGES ---
+
+On connect (type: "init"):
+  {
+    "type": "init",
+    "history": [ { "timestamp": "...", "grid_i_r": 150.3, ... }, ... ],
+    "status": { "connected": true, "last_success": "...", "error_count": 0 }
+  }
+  Note: history contains last 60 readings for immediate chart rendering
+
+Every poll cycle (type: "reading"):
+  {
+    "type": "reading",
+    "data": {
+      "grid_i_r": 150.234,
+      "grid_i_y": 148.512,
+      "grid_i_b": 151.089,
+      ... all 57 register values ...
+    },
+    "timestamp": "2026-03-07T14:23:45.123456",
+    "status": { "connected": true, "last_success": "...", "error_count": 0 }
+  }
+
+On Modbus error (type: "error"):
+  {
+    "type": "error",
+    "message": "Failed to read registers",
+    "status": { "connected": true, "error_count": 5, ... }
+  }
+
+On Modbus disconnect (type: "disconnected"):
+  {
+    "type": "disconnected",
+    "message": "Cannot connect to COM9",
+    "status": { "connected": false, "error_count": 12, ... }
+  }
+
+On ping reply (type: "pong"):
+  { "type": "pong" }
+
+--- CLIENT → SERVER MESSAGES ---
+
+Keep-alive (sent every 30s by frontend):
+  "ping"    →   server replies { "type": "pong" }
+
+
+================================================================================
+  9. MODBUS REGISTER MAP (Complete)
+================================================================================
+
+NOTE: All registers are Float32 CDAB byte order, 2 registers each.
+      Modbus address formula: offset = reg_40xxx - 40001
+
+  ADDRESS   NAME            UNIT    GROUP
+  --------  --------------  ------  ----------------
+  40011     grid_thdi_r     %       Grid THDi
+  40013     grid_thdi_y     %       Grid THDi
+  40015     grid_thdi_b     %       Grid THDi
+  40017     grid_i_r        A       Grid Current
+  40019     grid_i_y        A       Grid Current
+  40021     grid_i_b        A       Grid Current
+  40023     load_thdi_r     %       Load THDi
+  40025     load_thdi_y     %       Load THDi
+  40027     load_thdi_b     %       Load THDi
+  40029     load_i_r        A       Load Current
+  40031     load_i_y        A       Load Current
+  40033     load_i_b        A       Load Current
+  40035     volt_r          V       Voltage
+  40037     volt_y          V       Voltage
+  40039     volt_b          V       Voltage
+  40041     freq_r          Hz      Frequency
+  40043     freq_y          Hz      Frequency
+  40045     freq_b          Hz      Frequency
+  40047     thdu_r          %       THDu
+  40049     thdu_y          %       THDu
+  40051     thdu_b          %       THDu
+  40053     grid_i_n        A       Grid Current (Neutral)
+  40055     grid_thdi_n     %       Grid THDi (Neutral)
+  40057     grid_pf_r       PF      Grid Power Factor
+  40059     grid_pf_y       PF      Grid Power Factor
+  40061     grid_pf_b       PF      Grid Power Factor
+  40063     grid_pf_n       PF      Grid Power Factor
+  40065     comp_cur_r      A       Comp Current
+  40067     comp_cur_y      A       Comp Current
+  40069     comp_cur_b      A       Comp Current
+  40071     comp_rate_r     %       Comp Rate
+  40073     comp_rate_y     %       Comp Rate
+  40075     comp_rate_b     %       Comp Rate
+  40077     load_i_n        A       Load Current (Neutral)
+  40079     load_thdi_n     %       Load THDi (Neutral)
+  40081     load_pf_r       PF      Load Power Factor
+  40083     load_pf_y       PF      Load Power Factor
+  40085     load_pf_b       PF      Load Power Factor
+  40087     load_pf_n       PF      Load Power Factor
+  40089     grid_kvar_r     kVAr    Grid Reactive Power
+  40091     grid_kvar_y     kVAr    Grid Reactive Power
+  40093     grid_kvar_b     kVAr    Grid Reactive Power
+  40095     grid_kw_r       kW      Grid Active Power
+  40097     grid_kw_y       kW      Grid Active Power
+  40099     grid_kw_b       kW      Grid Active Power
+  40101     grid_kva_r      kVA     Grid Apparent Power
+  40103     grid_kva_y      kVA     Grid Apparent Power
+  40105     grid_kva_b      kVA     Grid Apparent Power
+  40107     load_kvar_r     kVAr    Load Reactive Power
+  40109     load_kvar_y     kVAr    Load Reactive Power
+  40111     load_kvar_b     kVAr    Load Reactive Power
+  40113     load_kw_r       kW      Load Active Power
+  40115     load_kw_y       kW      Load Active Power
+  40117     load_kw_b       kW      Load Active Power
+  40119     load_kva_r      kVA     Load Apparent Power
+  40121     load_kva_y      kVA     Load Apparent Power
+  40123     load_kva_b      kVA     Load Apparent Power
+  40125     temp_j1         °C      Temperature
+  40127     temp_j2         °C      Temperature
+  40129     temp_j3         °C      Temperature
+
+  TOTAL: 57 registers × 2 addresses each = 114 holding registers read per poll
+
+
+================================================================================
+  10. STARTUP SCRIPTS
+================================================================================
+
+────────────────────────────────────────────────────────────────────────────────
+  start.bat  (Windows)
+────────────────────────────────────────────────────────────────────────────────
+
+@echo off
+echo Starting FHHL Energy Monitor...
+start "FHHL Backend"  cmd /k "cd backend && python main.py"
+timeout /t 2 /nobreak >nul
+start "FHHL Frontend" cmd /k "cd frontend && npm run dev"
+timeout /t 3 /nobreak >nul
+start http://localhost:5173
+
+
+────────────────────────────────────────────────────────────────────────────────
+  start.sh   (Linux / macOS)
+────────────────────────────────────────────────────────────────────────────────
+
+#!/bin/bash
+cd backend && python main.py &
+BACKEND_PID=$!
+cd ..
+sleep 2
+cd frontend && npm run dev &
+FRONTEND_PID=$!
+sleep 2
+xdg-open http://localhost:5173 2>/dev/null || open http://localhost:5173
+echo "Backend PID: $BACKEND_PID  |  Frontend PID: $FRONTEND_PID"
+trap "kill $BACKEND_PID $FRONTEND_PID 2>/dev/null" EXIT
+wait
+
+
+================================================================================
+  END OF DOCUMENT
+  FHHL Energy Monitor v2.0 — Full Project Detail
+================================================================================
